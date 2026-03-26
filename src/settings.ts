@@ -1,0 +1,1 @@
+export const EDGE_CACHE_TTL_SECONDS = 3600;
