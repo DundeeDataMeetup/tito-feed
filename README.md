@@ -20,6 +20,8 @@ Cloudflare Worker that proxies Tito checkout feeds and enriches events with pars
   - `end_time: null`
   - `parse_error` with the parse failure reason
 - Sorts the final flat list by `start_time` descending/newest-first (events with `null` `start_time` are last).
+- Caches successful `GET` responses in Cloudflare's native edge cache for 1 hour using the Cache API.
+- Cache keys are normalized to the request path, so query strings do not create separate cache entries.
 
 ## Example
 

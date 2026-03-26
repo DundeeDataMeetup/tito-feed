@@ -3,9 +3,16 @@ import {
 	createExecutionContext,
 	waitOnExecutionContext,
 } from "cloudflare:test";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../src";
 
+let cacheMatchSpy: ReturnType<typeof vi.spyOn>;
+let cachePutSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+	cacheMatchSpy = vi.spyOn(caches.default, "match").mockResolvedValue(undefined);
+	cachePutSpy = vi.spyOn(caches.default, "put").mockResolvedValue(undefined);
+});
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -90,9 +97,12 @@ describe("Tito feed worker", () => {
 		expect(fetchSpy).toHaveBeenCalledWith(
 			"https://checkout.tito.io/dundee-data-meetup/feb-2026.json"
 		);
+		expect(cacheMatchSpy).toHaveBeenCalledTimes(1);
+		expect(cachePutSpy).toHaveBeenCalledTimes(1);
 		expect(fetchSpy).toHaveBeenCalledWith("https://ti.to/dundee-data-meetup/feb-2026");
 		expect(fetchSpy).toHaveBeenCalledWith("https://ti.to/dundee-data-meetup/mar-2026");
 		expect(response.status).toBe(200);
+		expect(response.headers.get("Cache-Control")).toBe("public, s-maxage=3600");
 		expect(await response.json()).toEqual([
 			{
 				banner_url:
@@ -189,6 +199,7 @@ describe("Tito feed worker", () => {
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
+		expect(cachePutSpy).toHaveBeenCalledTimes(1);
 		expect(await response.json()).toEqual([
 			{
 				banner_url: "https://example.com/ok.png",
@@ -223,5 +234,43 @@ describe("Tito feed worker", () => {
 
 		expect(response.status).toBe(400);
 		expect(await response.json()).toEqual({ error: "Path is required" });
+	});
+
+	it("returns a cached response when present and skips upstream fetches", async () => {
+		const request = new Request<unknown, IncomingRequestCfProperties>(
+			"http://example.com/dundee-data-meetup/feb-2026?utm_source=test"
+		);
+		const cachedPayload = [
+			{
+				banner_url: "https://example.com/cached.png",
+				location: "Cached Venue",
+				location_map_url: "https://maps.google.com/?q=cached",
+				title: "Cached Event",
+				url: "https://ti.to/dundee-data-meetup/cached",
+				start_time: "2026-04-01T18:00:00.000Z",
+				end_time: "2026-04-01T20:00:00.000Z",
+			},
+		];
+
+		cacheMatchSpy.mockResolvedValue(
+			new Response(JSON.stringify(cachedPayload), {
+				status: 200,
+				headers: {
+					"content-type": "application/json",
+					"Cache-Control": "public, s-maxage=3600",
+				},
+			})
+		);
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(cacheMatchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(cachePutSpy).not.toHaveBeenCalled();
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual(cachedPayload);
 	});
 });

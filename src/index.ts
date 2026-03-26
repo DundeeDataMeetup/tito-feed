@@ -1,5 +1,8 @@
 import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 
+// 1 hour cache TTL
+const EDGE_CACHE_TTL_SECONDS = 3600;
+
 type TitoEvent = {
 	banner_url: string;
 	location: string;
@@ -300,8 +303,38 @@ async function flattenEvents(payload: TitoResponse): Promise<EnrichedTitoEvent[]
 	return Promise.all(events.map((event) => enrichEvent(event)));
 }
 
+function createCacheKey(request: Request): Request {
+	const url = new URL(request.url);
+	url.search = '';
+	return new Request(url.toString(), { method: 'GET' });
+}
+
+function withCacheHeaders(response: Response): Response {
+	const headers = new Headers(response.headers);
+	headers.set('Cache-Control', `public, s-maxage=${EDGE_CACHE_TTL_SECONDS}`);
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
+		if (request.method !== 'GET') {
+			return new Response('Method Not Allowed', {
+				status: 405,
+				headers: { Allow: 'GET' },
+			});
+		}
+
+		const cache = caches.default;
+		const cacheKey = createCacheKey(request);
+		const cachedResponse = await cache.match(cacheKey);
+		if (cachedResponse) {
+			return cachedResponse;
+		}
+
 		const url = new URL(request.url);
 		const path = url.pathname.replace(/^\/+|\/+$/g, '');
 
@@ -321,7 +354,10 @@ export default {
 
 		const payload = (await upstreamResponse.json()) as TitoResponse;
 		const events = sortEventsByStartTime(await flattenEvents(payload));
+		const response = withCacheHeaders(Response.json(events));
 
-		return Response.json(events);
+		ctx.waitUntil(cache.put(cacheKey, response.clone()));
+
+		return response;
 	},
 } satisfies ExportedHandler<Env>;
