@@ -5,6 +5,11 @@ Cloudflare Worker that proxies Tito checkout feeds and enriches events with pars
 ## How it works
 
 - Takes the incoming request path as `<PATH>`.
+- Supports path suffixes:
+  - no extension: JSON
+  - `.json`: JSON
+  - `.ics`: iCalendar feed
+  - `.rss`: RSS feed
 - Fetches `https://checkout.tito.io/<PATH>.json`.
 - Reads events from `events.past`, `events.unscheduled`, and `events.upcoming`.
 - Returns one flat JSON array of events.
@@ -22,12 +27,19 @@ Cloudflare Worker that proxies Tito checkout feeds and enriches events with pars
 - Sorts the final flat list by `start_time` descending/newest-first (events with `null` `start_time` are last).
 - Caches successful `GET` responses in Cloudflare's native edge cache for 1 hour using the Cache API.
 - Cache keys are normalized to the request path, so query strings do not create separate cache entries.
+- JSON requests with and without `.json` are normalized to the same cache entry.
 
 ## Example
 
 Request:
 
 `GET /dundee-data-meetup/feb-2026`
+
+Also supported:
+
+- `GET /dundee-data-meetup/feb-2026.json`
+- `GET /dundee-data-meetup/feb-2026.ics`
+- `GET /dundee-data-meetup/feb-2026.rss`
 
 Upstream fetched by the worker:
 
@@ -74,4 +86,4 @@ Response shape:
 
 ## Test
 
-- `npm test -- --run`
+- `npm run test`

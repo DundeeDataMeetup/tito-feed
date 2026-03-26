@@ -9,6 +9,46 @@ import worker from "../src";
 let cacheMatchSpy: ReturnType<typeof vi.spyOn>;
 let cachePutSpy: ReturnType<typeof vi.spyOn>;
 
+function mockTitoFeedFetches(upstreamPayload: unknown) {
+	return vi.spyOn(globalThis, "fetch").mockImplementation((input: string | URL | Request) => {
+		const requestUrl =
+			typeof input === "string"
+				? input
+				: input instanceof URL
+					? input.toString()
+					: input.url;
+
+		if (requestUrl === "https://checkout.tito.io/dundee-data-meetup/feb-2026.json") {
+			return Promise.resolve(
+				new Response(JSON.stringify(upstreamPayload), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				})
+			);
+		}
+
+		if (requestUrl === "https://ti.to/dundee-data-meetup/feb-2026") {
+			return Promise.resolve(
+				new Response(
+					'<html><div class="tito-event-homepage--basic-info-cal">6–8pm, February 24th, 2026</div><div class="tito-venues">Bonar Hall, Dundee <a href="https://maps.google.com/?q=bonar+hall">Map</a></div></html>',
+					{ status: 200, headers: { "content-type": "text/html" } }
+				)
+			);
+		}
+
+		if (requestUrl === "https://ti.to/dundee-data-meetup/mar-2026") {
+			return Promise.resolve(
+				new Response(
+					'<html><div class="tito-event-homepage--basic-info-cal">6:30-8:15pm, March 31st, 2026</div><div class="tito-venues">CodeBase, Dundee <a href="https://maps.google.com/?q=codebase+dundee">Map</a></div></html>',
+					{ status: 200, headers: { "content-type": "text/html" } }
+				)
+			);
+		}
+
+		return Promise.reject(new Error(`Unexpected URL in test: ${requestUrl}`));
+	});
+}
+
 beforeEach(() => {
 	cacheMatchSpy = vi.spyOn(caches.default, "match").mockResolvedValue(undefined);
 	cachePutSpy = vi.spyOn(caches.default, "put").mockResolvedValue(undefined);
@@ -50,45 +90,7 @@ describe("Tito feed worker", () => {
 			},
 		};
 
-		const fetchSpy = vi
-			.spyOn(globalThis, "fetch")
-			.mockImplementation((input: string | URL | Request) => {
-				const requestUrl =
-					typeof input === "string"
-						? input
-						: input instanceof URL
-							? input.toString()
-							: input.url;
-
-				if (requestUrl === "https://checkout.tito.io/dundee-data-meetup/feb-2026.json") {
-					return Promise.resolve(
-						new Response(JSON.stringify(upstreamPayload), {
-							status: 200,
-							headers: { "content-type": "application/json" },
-						})
-					);
-				}
-
-				if (requestUrl === "https://ti.to/dundee-data-meetup/feb-2026") {
-					return Promise.resolve(
-						new Response(
-							'<html><div class="tito-event-homepage--basic-info-cal">6–8pm, February 24th, 2026</div><div class="tito-venues">Bonar Hall, Dundee <a href="https://maps.google.com/?q=bonar+hall">Map</a></div></html>',
-							{ status: 200, headers: { "content-type": "text/html" } }
-						)
-					);
-				}
-
-				if (requestUrl === "https://ti.to/dundee-data-meetup/mar-2026") {
-					return Promise.resolve(
-						new Response(
-							'<html><div class="tito-event-homepage--basic-info-cal">6:30-8:15pm, March 31st, 2026</div><div class="tito-venues">CodeBase, Dundee <a href="https://maps.google.com/?q=codebase+dundee">Map</a></div></html>',
-							{ status: 200, headers: { "content-type": "text/html" } }
-						)
-					);
-				}
-
-				return Promise.reject(new Error(`Unexpected URL in test: ${requestUrl}`));
-			});
+		const fetchSpy = mockTitoFeedFetches(upstreamPayload);
 
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, env, ctx);
@@ -97,6 +99,8 @@ describe("Tito feed worker", () => {
 		expect(fetchSpy).toHaveBeenCalledWith(
 			"https://checkout.tito.io/dundee-data-meetup/feb-2026.json"
 		);
+		const cacheRequest = cacheMatchSpy.mock.calls[0]?.[0] as Request;
+		expect(cacheRequest.url).toBe("http://example.com/dundee-data-meetup/feb-2026.json");
 		expect(cacheMatchSpy).toHaveBeenCalledTimes(1);
 		expect(cachePutSpy).toHaveBeenCalledTimes(1);
 		expect(fetchSpy).toHaveBeenCalledWith("https://ti.to/dundee-data-meetup/feb-2026");
@@ -123,6 +127,48 @@ describe("Tito feed worker", () => {
 				url: "https://ti.to/dundee-data-meetup/feb-2026",
 				start_time: "2026-02-24T18:00:00.000Z",
 				end_time: "2026-02-24T20:00:00.000Z",
+			},
+		]);
+	});
+
+	it("returns the same JSON output when .json is explicitly requested", async () => {
+		const request = new Request<unknown, IncomingRequestCfProperties>(
+			"http://example.com/dundee-data-meetup/feb-2026.json"
+		);
+		const upstreamPayload = {
+			events: {
+				past: [],
+				unscheduled: [],
+				upcoming: [
+					{
+						banner_url: "https://example.com/banner.png",
+						location: "Dundee, UK",
+						time: "March 31st, 2026",
+						title: "March Event",
+						url: "https://ti.to/dundee-data-meetup/mar-2026",
+					},
+				],
+			},
+		};
+
+		const fetchSpy = mockTitoFeedFetches(upstreamPayload);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(fetchSpy).toHaveBeenCalledWith(
+			"https://checkout.tito.io/dundee-data-meetup/feb-2026.json"
+		);
+		expect(response.headers.get("content-type")).toContain("application/json");
+		expect(await response.json()).toEqual([
+			{
+				banner_url: "https://example.com/banner.png",
+				location: "CodeBase, Dundee Map",
+				location_map_url: "https://maps.google.com/?q=codebase+dundee",
+				title: "March Event",
+				url: "https://ti.to/dundee-data-meetup/mar-2026",
+				start_time: "2026-03-31T18:30:00.000Z",
+				end_time: "2026-03-31T20:15:00.000Z",
 			},
 		]);
 	});
@@ -272,5 +318,72 @@ describe("Tito feed worker", () => {
 		expect(cachePutSpy).not.toHaveBeenCalled();
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual(cachedPayload);
+	});
+
+	it("returns an iCal feed when .ics is requested", async () => {
+		const request = new Request<unknown, IncomingRequestCfProperties>(
+			"http://example.com/dundee-data-meetup/feb-2026.ics"
+		);
+		const upstreamPayload = {
+			events: {
+				past: [],
+				unscheduled: [],
+				upcoming: [
+					{
+						banner_url: "https://example.com/banner.png",
+						location: "Dundee, UK",
+						time: "March 31st, 2026",
+						title: "March Event",
+						url: "https://ti.to/dundee-data-meetup/mar-2026",
+					},
+				],
+			},
+		};
+
+		mockTitoFeedFetches(upstreamPayload);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.headers.get("content-type")).toBe("text/calendar; charset=utf-8");
+		const body = await response.text();
+		expect(body).toContain("BEGIN:VCALENDAR");
+		expect(body).toContain("BEGIN:VEVENT");
+		expect(body).toContain("SUMMARY:March Event");
+		expect(body).toContain("DTSTART:20260331T183000Z");
+		expect(body).toContain("URL;VALUE=URI:https://ti.to/dundee-data-meetup/mar-2026");
+	});
+
+	it("returns an RSS feed when .rss is requested", async () => {
+		const request = new Request<unknown, IncomingRequestCfProperties>(
+			"http://example.com/dundee-data-meetup/feb-2026.rss"
+		);
+		const upstreamPayload = {
+			events: {
+				past: [],
+				unscheduled: [],
+				upcoming: [
+					{
+						banner_url: "https://example.com/banner.png",
+						location: "Dundee, UK",
+						time: "March 31st, 2026",
+						title: "March Event",
+						url: "https://ti.to/dundee-data-meetup/mar-2026",
+					},
+				],
+			},
+		};
+
+		mockTitoFeedFetches(upstreamPayload);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.headers.get("content-type")).toBe("application/rss+xml; charset=utf-8");
+		const body = await response.text();
+		expect(body).toContain("<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">");
+		expect(body).toContain("<title><![CDATA[March Event]]></title>");
+		expect(body).toContain("<link>https://ti.to/dundee-data-meetup/mar-2026</link>");
+		expect(body).toContain("<description><![CDATA[Location: CodeBase, Dundee Map");
 	});
 });

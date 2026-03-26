@@ -1,7 +1,11 @@
+import { Feed } from 'feed';
+import ical from 'ical-generator';
 import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 
 // 1 hour cache TTL
 const EDGE_CACHE_TTL_SECONDS = 3600;
+
+type ResponseFormat = 'json' | 'ics' | 'rss';
 
 type TitoEvent = {
 	banner_url: string;
@@ -28,6 +32,11 @@ type TitoResponse = {
 		unscheduled?: TitoEvent[];
 		upcoming?: TitoEvent[];
 	};
+};
+
+type RequestTarget = {
+	path: string;
+	format: ResponseFormat;
 };
 
 const MONTH_INDEX: Record<string, number> = {
@@ -303,9 +312,140 @@ async function flattenEvents(payload: TitoResponse): Promise<EnrichedTitoEvent[]
 	return Promise.all(events.map((event) => enrichEvent(event)));
 }
 
+function parseRequestTarget(pathname: string): RequestTarget {
+	const normalizedPath = pathname.replace(/^\/+|\/+$/g, '');
+	if (!normalizedPath) {
+		return { path: '', format: 'json' };
+	}
+
+	if (normalizedPath.endsWith('.json')) {
+		return { path: normalizedPath.slice(0, -'.json'.length), format: 'json' };
+	}
+
+	if (normalizedPath.endsWith('.ics')) {
+		return { path: normalizedPath.slice(0, -'.ics'.length), format: 'ics' };
+	}
+
+	if (normalizedPath.endsWith('.rss')) {
+		return { path: normalizedPath.slice(0, -'.rss'.length), format: 'rss' };
+	}
+
+	const lastSegment = normalizedPath.split('/').pop() ?? normalizedPath;
+	if (/\.[A-Za-z0-9]+$/.test(lastSegment)) {
+		throw new Error(`Unsupported format extension in path: ${lastSegment}`);
+	}
+
+	return { path: normalizedPath, format: 'json' };
+}
+
+function buildFeedTitle(path: string): string {
+	return path
+		.split('/')
+		.filter(Boolean)
+		.map((segment) =>
+			segment
+				.split('-')
+				.filter(Boolean)
+				.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+				.join(' ')
+		)
+		.join(' / ');
+}
+
+function createEventDescription(event: EnrichedTitoEvent): string {
+	const parts = [
+		`Location: ${event.location}`,
+		event.location_map_url ? `Map: ${event.location_map_url}` : null,
+		event.parse_error ? `Parse error: ${event.parse_error}` : null,
+	].filter((value): value is string => value !== null);
+
+	return parts.join('\n');
+}
+
+function serializeJson(events: EnrichedTitoEvent[]): Response {
+	return Response.json(events);
+}
+
+function serializeICal(events: EnrichedTitoEvent[], path: string): Response {
+	const calendarName = buildFeedTitle(path) || 'Tito Feed';
+	const calendar = ical({
+		name: calendarName,
+		prodId: { company: 'tito-feed', product: 'tito-feed' },
+	});
+
+	events
+		.filter((event) => event.start_time !== null && event.end_time !== null)
+		.forEach((event) => {
+			calendar.createEvent({
+				id: event.url,
+				start: new Date(event.start_time),
+				end: new Date(event.end_time),
+				summary: event.title,
+				description: createEventDescription(event),
+				location: event.location,
+				url: event.url,
+			});
+		});
+
+	return new Response(calendar.toString(), {
+		headers: { 'Content-Type': 'text/calendar; charset=utf-8' },
+	});
+}
+
+function serializeRss(events: EnrichedTitoEvent[], path: string, requestUrl: URL): Response {
+	const feedTitle = buildFeedTitle(path) || 'Tito Feed';
+	const feedPath = `/${path}.rss`;
+	const feed = new Feed({
+		title: feedTitle,
+		id: requestUrl.origin + feedPath,
+		link: `${requestUrl.origin}/${path}`,
+		description: `Feed for ${feedTitle}`,
+		generator: 'tito-feed',
+		feedLinks: {
+			rss: requestUrl.origin + feedPath,
+		},
+		updated: new Date(),
+		ttl: EDGE_CACHE_TTL_SECONDS / 60,
+	});
+
+	events.forEach((event) => {
+		feed.addItem({
+			title: event.title,
+			id: event.url,
+			link: event.url,
+			description: createEventDescription(event),
+			date: new Date(event.start_time ?? event.end_time ?? Date.now()),
+			published: event.start_time ? new Date(event.start_time) : undefined,
+		});
+	});
+
+	return new Response(feed.rss2(), {
+		headers: { 'Content-Type': 'application/rss+xml; charset=utf-8' },
+	});
+}
+
+function createFormattedResponse(
+	events: EnrichedTitoEvent[],
+	path: string,
+	format: ResponseFormat,
+	requestUrl: URL
+): Response {
+	switch (format) {
+		case 'ics':
+			return serializeICal(events, path);
+		case 'rss':
+			return serializeRss(events, path, requestUrl);
+		case 'json':
+		default:
+			return serializeJson(events);
+	}
+}
+
 function createCacheKey(request: Request): Request {
 	const url = new URL(request.url);
+	const target = parseRequestTarget(url.pathname);
 	url.search = '';
+	url.pathname = `/${target.path}${target.format === 'json' ? '.json' : `.${target.format}`}`;
 	return new Request(url.toString(), { method: 'GET' });
 }
 
@@ -328,6 +468,17 @@ export default {
 			});
 		}
 
+		const url = new URL(request.url);
+		let target: RequestTarget;
+		try {
+			target = parseRequestTarget(url.pathname);
+		} catch (error) {
+			return Response.json(
+				{ error: error instanceof Error ? error.message : 'Invalid request path' },
+				{ status: 400 }
+			);
+		}
+
 		const cache = caches.default;
 		const cacheKey = createCacheKey(request);
 		const cachedResponse = await cache.match(cacheKey);
@@ -335,8 +486,7 @@ export default {
 			return cachedResponse;
 		}
 
-		const url = new URL(request.url);
-		const path = url.pathname.replace(/^\/+|\/+$/g, '');
+		const { path, format } = target;
 
 		if (!path) {
 			return Response.json({ error: 'Path is required' }, { status: 400 });
@@ -354,7 +504,7 @@ export default {
 
 		const payload = (await upstreamResponse.json()) as TitoResponse;
 		const events = sortEventsByStartTime(await flattenEvents(payload));
-		const response = withCacheHeaders(Response.json(events));
+		const response = withCacheHeaders(createFormattedResponse(events, path, format, url));
 
 		ctx.waitUntil(cache.put(cacheKey, response.clone()));
 

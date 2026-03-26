@@ -17,6 +17,8 @@
 		"wrangler": "^4.77.0"
 	},
 	"dependencies": {
+		"feed": "^5.2.0",
+		"ical-generator": "^10.1.0",
 		"parse5": "^8.0.0"
 	}
 }
